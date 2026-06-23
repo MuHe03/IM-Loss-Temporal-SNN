@@ -17,6 +17,30 @@ cd imloss
 python main_train.py --spike --step 1 --distribution
 ```
 
+## SHD Temporal Experiments
+
+The Python training and evaluation entry points remain at the repository root:
+
+```bash
+python train_temporal.py --help
+python eval_temporal.py --help
+```
+
+Training wrappers run one array task at a time:
+
+```bash
+scripts/train_temporal_multiseed_local.sh 0
+scripts/train_ff_output_3way_local.sh 5
+scripts/train_ff_output_threshold_im_local.sh 0
+scripts/eval_temporal_local.sh runs/.../best.pth
+```
+
+Override the interpreter or device through environment variables when needed:
+
+```bash
+PYTHON=python CUDA_VISIBLE_DEVICES=0 scripts/train_ff_output_3way_local.sh 5
+```
+
 ## Citation
 
 ```bash

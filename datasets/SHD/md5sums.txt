@@ -1,0 +1,11 @@
+e95704b1a726235e3c679baa81bb49c7  hd_audio.tar.gz
+3062a80ec0c5719404d5b02e166543b1  shd_test.h5.gz
+d47c9825dee33347913e8ce0f2be08b0  shd_train.h5.gz
+e3cf5aa4524459b8e5141b9b34a9e759  ssc_test.h5.gz
+cc61f72a5a5b6d564a3cfdbc75dadcc5  ssc_train.h5.gz
+555645b13e15fe270fbfe39cb763f805  ssc_valid.h5.gz
+1503a5064faa34311c398fb0a1ed0a6f  shd_test.h5.zip
+f3252aeb598ac776c1b526422d90eecb  shd_train.h5.zip
+a35ff1e9cffdd02a20eb850c17c37748  ssc_test.h5.zip
+d102be95e7144fcc0553d1f45ba94170  ssc_train.h5.zip
+b4eee3516a4a90dd0c71a6ac23a8ae43  ssc_valid.h5.zip
