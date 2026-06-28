@@ -1,4 +1,5 @@
 import argparse
+import csv
 import datetime
 import json
 import os
@@ -8,11 +9,13 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from data.randman import build_randman_loaders
 from data.shd import build_shd_loaders
 from models.temporal_snn import (
     FeedForwardLIFClassifier,
     RecurrentLIFClassifier,
     firing_rate_stats,
+    output_spike_stats,
     temporal_im_loss,
     temporal_threshold_im_loss,
 )
@@ -45,16 +48,6 @@ def accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
     return predictions.eq(labels).float().mean().item()
 
 
-def output_firing_stats(output_spikes: torch.Tensor) -> Dict[str, float]:
-    if not torch.is_tensor(output_spikes) or output_spikes.numel() == 0:
-        return {}
-    class_rates = output_spikes.detach().mean(dim=(0, 1))
-    return {
-        "firing_rate_output": class_rates.mean().item(),
-        "silent_neuron_ratio_output": (class_rates <= 0).float().mean().item(),
-    }
-
-
 def make_optimizer(args, model):
     if args.optimizer == "adam":
         return torch.optim.Adam(
@@ -72,6 +65,39 @@ def make_optimizer(args, model):
             weight_decay=args.weight_decay,
         )
     raise ValueError("unsupported optimizer {}".format(args.optimizer))
+
+
+def current_learning_rate(optimizer: torch.optim.Optimizer) -> float:
+    if not optimizer.param_groups:
+        return 0.0
+    return float(optimizer.param_groups[0].get("lr", 0.0))
+
+
+def make_epoch_row(
+    epoch: int,
+    learning_rate: float,
+    train_metrics: Dict[str, float],
+    val_metrics: Dict[str, float],
+) -> Dict[str, float]:
+    row: Dict[str, float] = {
+        "epoch": epoch,
+        "learning_rate": learning_rate,
+    }
+    for prefix, metrics in (("train", train_metrics), ("val", val_metrics)):
+        for key, value in metrics.items():
+            row["{}_{}".format(prefix, key)] = value
+    return row
+
+
+def write_metrics_csv(path: str, rows) -> None:
+    fixed = ["epoch", "learning_rate"]
+    metric_keys = sorted({key for row in rows for key in row.keys()} - set(fixed))
+    fieldnames = fixed + metric_keys
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def run_epoch(
@@ -105,8 +131,10 @@ def run_epoch(
             optimizer.zero_grad(set_to_none=True)
 
         with torch.set_grad_enabled(is_train):
-            logits, aux = model(spikes, lengths=lengths, return_spikes=args.use_im_loss)
+            track_activity = args.use_im_loss or not args.no_activity_metrics
+            logits, aux = model(spikes, lengths=lengths, return_spikes=track_activity)
             ce_loss = criterion(logits, labels)
+            output_im_loss = ce_loss.detach().new_tensor(0.0)
             if args.use_im_loss:
                 if args.im_loss_type == "threshold":
                     hidden_im_loss = temporal_threshold_im_loss(
@@ -120,7 +148,6 @@ def run_epoch(
                         lengths=lengths,
                         target_rate=args.im_target_rate,
                     )
-                output_im_loss = ce_loss.detach().new_tensor(0.0)
                 if args.im_include_output:
                     if args.im_loss_type == "threshold" and torch.is_tensor(
                         aux.get("output_membranes")
@@ -141,12 +168,20 @@ def run_epoch(
                     + args.im_output_weight * output_im_loss
                 )
                 loss = ce_loss + args.im_loss_weight * im_loss
-                batch_firing_stats = firing_rate_stats(aux["hidden_spikes"])
-                batch_firing_stats.update(output_firing_stats(aux.get("output_spikes", [])))
             else:
                 im_loss = ce_loss.detach().new_tensor(0.0)
-                output_im_loss = ce_loss.detach().new_tensor(0.0)
                 loss = ce_loss
+
+            if track_activity:
+                batch_firing_stats = firing_rate_stats(
+                    aux.get("hidden_spikes", []), lengths=lengths
+                )
+                batch_firing_stats.update(
+                    output_spike_stats(
+                        aux.get("output_spikes", []), lengths=lengths, labels=labels
+                    )
+                )
+            else:
                 batch_firing_stats = {}
 
             if is_train:
@@ -188,7 +223,17 @@ def run_epoch(
     return metrics
 
 
-def save_checkpoint(path: str, model, optimizer, scheduler, args, meta, epoch, best_val_acc):
+def save_checkpoint(
+    path: str,
+    model,
+    optimizer,
+    scheduler,
+    args,
+    meta,
+    epoch,
+    best_val_acc,
+    best_epoch,
+):
     checkpoint = {
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
@@ -197,16 +242,17 @@ def save_checkpoint(path: str, model, optimizer, scheduler, args, meta, epoch, b
         "meta": meta,
         "epoch": epoch,
         "best_val_acc": best_val_acc,
+        "best_epoch": best_epoch,
     }
     torch.save(checkpoint, path)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Temporal-native SHD LIF/RSNN baseline",
+        description="Temporal-native LIF/RSNN training",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--dataset", default="SHD", choices=["SHD"])
+    parser.add_argument("--dataset", default="Randman", choices=["Randman", "SHD"])
     parser.add_argument("--data_root", default="datasets/SHD")
     parser.add_argument("--output_dir", default="runs/temporal")
     parser.add_argument("--batch_size", type=int, default=64)
@@ -219,6 +265,17 @@ def parse_args():
     parser.add_argument("--input_mode", choices=["binary", "count"], default="binary")
     parser.add_argument("--valid_split", type=float, default=0.1)
 
+    parser.add_argument("--randman_train_samples", type=int, default=1024)
+    parser.add_argument("--randman_val_samples", type=int, default=256)
+    parser.add_argument("--randman_test_samples", type=int, default=256)
+    parser.add_argument("--randman_input_size", type=int, default=128)
+    parser.add_argument("--randman_num_classes", type=int, default=10)
+    parser.add_argument("--randman_num_steps", type=int, default=100)
+    parser.add_argument("--randman_manifold_dim", type=int, default=2)
+    parser.add_argument("--randman_spike_prob", type=float, default=0.35)
+    parser.add_argument("--randman_noise_rate", type=float, default=0.001)
+    parser.add_argument("--randman_jitter_std", type=float, default=1.0)
+
     parser.add_argument("--arch", choices=["lif_mlp", "rsnn_lif"], default="lif_mlp")
     parser.add_argument("--hidden_size", type=int, default=256)
     parser.add_argument("--num_layers", type=int, default=1)
@@ -228,7 +285,9 @@ def parse_args():
     parser.add_argument("--surrogate_slope", type=float, default=25.0)
     parser.add_argument("--recurrent_scale", type=float, default=0.5)
     parser.add_argument(
-        "--readout", choices=["mean_membrane", "last_membrane"], default="mean_membrane"
+        "--readout",
+        choices=["mean_membrane", "last_membrane", "max_membrane"],
+        default="max_membrane",
     )
     parser.add_argument(
         "--output_mode",
@@ -258,6 +317,11 @@ def parse_args():
     parser.add_argument("--log_interval", type=int, default=20)
     parser.add_argument("--max_train_batches", type=int, default=0)
     parser.add_argument("--max_eval_batches", type=int, default=0)
+    parser.add_argument(
+        "--no_activity_metrics",
+        action="store_true",
+        help="skip per-epoch spike activity diagnostics unless IM loss needs them",
+    )
     parser.add_argument("--no_cuda", action="store_true")
     return parser.parse_args()
 
@@ -269,17 +333,37 @@ def main():
     use_cuda = torch.cuda.is_available() and not args.no_cuda
     device = torch.device("cuda:0" if use_cuda else "cpu")
 
-    train_loader, val_loader, test_loader, meta = build_shd_loaders(
-        root=args.data_root,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        dt=args.dt,
-        t_stop=args.t_stop,
-        input_mode=args.input_mode,
-        valid_split=args.valid_split,
-        seed=args.seed,
-        pin_memory=use_cuda,
-    )
+    if args.dataset == "SHD":
+        train_loader, val_loader, test_loader, meta = build_shd_loaders(
+            root=args.data_root,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            dt=args.dt,
+            t_stop=args.t_stop,
+            input_mode=args.input_mode,
+            valid_split=args.valid_split,
+            seed=args.seed,
+            pin_memory=use_cuda,
+        )
+    elif args.dataset == "Randman":
+        train_loader, val_loader, test_loader, meta = build_randman_loaders(
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            train_samples=args.randman_train_samples,
+            val_samples=args.randman_val_samples,
+            test_samples=args.randman_test_samples,
+            num_units=args.randman_input_size,
+            num_classes=args.randman_num_classes,
+            num_steps=args.randman_num_steps,
+            manifold_dim=args.randman_manifold_dim,
+            spike_prob=args.randman_spike_prob,
+            noise_rate=args.randman_noise_rate,
+            jitter_std=args.randman_jitter_std,
+            seed=args.seed,
+            pin_memory=use_cuda,
+        )
+    else:
+        raise ValueError("unsupported dataset {}".format(args.dataset))
 
     hidden_sizes = [args.hidden_size] * args.num_layers
     if args.arch == "lif_mlp":
@@ -341,6 +425,9 @@ def main():
 
     eval_loader = val_loader if val_loader is not None else test_loader
     best_val_acc = 0.0
+    best_epoch = 0
+    history_rows = []
+    metrics_csv_path = os.path.join(run_dir, "metrics.csv")
 
     for epoch in range(1, args.epochs + 1):
         train_metrics = run_epoch(
@@ -361,6 +448,7 @@ def main():
             optimizer=None,
             max_batches=args.max_eval_batches,
         )
+        learning_rate = current_learning_rate(optimizer)
         if scheduler is not None:
             scheduler.step()
 
@@ -376,6 +464,16 @@ def main():
             )
         )
 
+        is_best = val_metrics["acc"] > best_val_acc
+        if is_best:
+            best_val_acc = val_metrics["acc"]
+            best_epoch = epoch
+
+        history_rows.append(
+            make_epoch_row(epoch, learning_rate, train_metrics, val_metrics)
+        )
+        write_metrics_csv(metrics_csv_path, history_rows)
+
         save_checkpoint(
             os.path.join(run_dir, "last.pth"),
             model,
@@ -385,9 +483,9 @@ def main():
             meta,
             epoch,
             best_val_acc,
+            best_epoch,
         )
-        if val_metrics["acc"] > best_val_acc:
-            best_val_acc = val_metrics["acc"]
+        if is_best:
             save_checkpoint(
                 os.path.join(run_dir, "best.pth"),
                 model,
@@ -397,7 +495,13 @@ def main():
                 meta,
                 epoch,
                 best_val_acc,
+                best_epoch,
             )
+
+    best_path = os.path.join(run_dir, "best.pth")
+    if os.path.exists(best_path):
+        checkpoint = torch.load(best_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state"])
 
     test_metrics = run_epoch(
         model,
@@ -409,7 +513,17 @@ def main():
         max_batches=args.max_eval_batches,
     )
     with open(os.path.join(run_dir, "metrics.json"), "w") as handle:
-        json.dump({"test": test_metrics, "best_val_acc": best_val_acc}, handle, indent=2)
+        json.dump(
+            {
+                "test": test_metrics,
+                "best_val_acc": best_val_acc,
+                "best_epoch": best_epoch,
+                "test_checkpoint": best_path,
+                "history_csv": metrics_csv_path,
+            },
+            handle,
+            indent=2,
+        )
     print(
         "test acc {:.2f} ce {:.4f}".format(
             test_metrics["acc"] * 100.0, test_metrics["ce_loss"]

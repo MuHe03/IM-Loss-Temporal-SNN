@@ -1,4 +1,13 @@
 runs/
+raw/
+summaries/
+cifar10/
+cifar100/
+*.pth
+*.pt
+*.ckpt
+datasets/SHD/*.h5
+datasets/SHD/*.h5.gz
 
 # Python bytecode and tool caches
 __pycache__/
@@ -7,3 +16,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.matplotlib/
+.venv/
+venv/
+
+# Keep Markdown notes versionable while allowing local PDF briefs to remain local.
+docs/

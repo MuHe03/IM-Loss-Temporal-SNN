@@ -45,8 +45,10 @@ class FeedForwardLIFClassifier(nn.Module):
         super().__init__()
         if not hidden_sizes:
             raise ValueError("hidden_sizes must contain at least one layer")
-        if readout not in ("mean_membrane", "last_membrane"):
-            raise ValueError("readout must be 'mean_membrane' or 'last_membrane'")
+        if readout not in ("mean_membrane", "last_membrane", "max_membrane"):
+            raise ValueError(
+                "readout must be 'mean_membrane', 'last_membrane', or 'max_membrane'"
+            )
         if output_mode not in ("nonspiking", "spiking_count"):
             raise ValueError("output_mode must be 'nonspiking' or 'spiking_count'")
 
@@ -84,6 +86,16 @@ class FeedForwardLIFClassifier(nn.Module):
             last_idx = lengths.clamp(1, readout_trace.size(0)) - 1
             batch_idx = torch.arange(readout_trace.size(1), device=readout_trace.device)
             return readout_trace[last_idx, batch_idx]
+
+        if self.readout == "max_membrane":
+            if lengths is None:
+                return readout_trace.max(dim=0).values
+            steps = torch.arange(readout_trace.size(0), device=readout_trace.device)
+            valid = steps[:, None] < lengths.clamp(1, readout_trace.size(0))[None, :]
+            masked = readout_trace.masked_fill(
+                ~valid.unsqueeze(-1), torch.finfo(readout_trace.dtype).min
+            )
+            return masked.max(dim=0).values
 
         if lengths is None:
             return readout_trace.mean(dim=0)
@@ -214,8 +226,10 @@ class RecurrentLIFClassifier(nn.Module):
         super().__init__()
         if not hidden_sizes:
             raise ValueError("hidden_sizes must contain at least one layer")
-        if readout not in ("mean_membrane", "last_membrane"):
-            raise ValueError("readout must be 'mean_membrane' or 'last_membrane'")
+        if readout not in ("mean_membrane", "last_membrane", "max_membrane"):
+            raise ValueError(
+                "readout must be 'mean_membrane', 'last_membrane', or 'max_membrane'"
+            )
 
         self.input_size = int(input_size)
         self.hidden_sizes = [int(size) for size in hidden_sizes]
@@ -257,6 +271,16 @@ class RecurrentLIFClassifier(nn.Module):
             last_idx = lengths.clamp(1, readout_trace.size(0)) - 1
             batch_idx = torch.arange(readout_trace.size(1), device=readout_trace.device)
             return readout_trace[last_idx, batch_idx]
+
+        if self.readout == "max_membrane":
+            if lengths is None:
+                return readout_trace.max(dim=0).values
+            steps = torch.arange(readout_trace.size(0), device=readout_trace.device)
+            valid = steps[:, None] < lengths.clamp(1, readout_trace.size(0))[None, :]
+            masked = readout_trace.masked_fill(
+                ~valid.unsqueeze(-1), torch.finfo(readout_trace.dtype).min
+            )
+            return masked.max(dim=0).values
 
         if lengths is None:
             return readout_trace.mean(dim=0)
@@ -345,6 +369,13 @@ class RecurrentLIFClassifier(nn.Module):
         return logits, aux
 
 
+def _valid_time_mask(trace: torch.Tensor, lengths: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if lengths is None:
+        return None
+    steps = torch.arange(trace.size(0), device=trace.device)
+    return steps[:, None] < lengths.clamp(1, trace.size(0))[None, :]
+
+
 def temporal_im_loss(
     hidden_spikes: Sequence[torch.Tensor],
     lengths: Optional[torch.Tensor] = None,
@@ -355,11 +386,10 @@ def temporal_im_loss(
 
     losses = []
     for trace in hidden_spikes:
-        if lengths is None:
+        valid = _valid_time_mask(trace, lengths)
+        if valid is None:
             firing_rate = trace.mean()
         else:
-            steps = torch.arange(trace.size(0), device=trace.device)
-            valid = steps[:, None] < lengths.clamp(1, trace.size(0))[None, :]
             valid = valid.to(trace.dtype).unsqueeze(-1)
             firing_rate = (trace * valid).sum() / (valid.sum() * trace.size(-1))
         losses.append((firing_rate - target_rate) ** 2)
@@ -376,23 +406,108 @@ def temporal_threshold_im_loss(
 
     losses = []
     for trace in membrane_traces:
-        if lengths is None:
+        valid = _valid_time_mask(trace, lengths)
+        if valid is None:
             membrane_mean = trace.mean()
         else:
-            steps = torch.arange(trace.size(0), device=trace.device)
-            valid = steps[:, None] < lengths.clamp(1, trace.size(0))[None, :]
             valid = valid.to(trace.dtype).unsqueeze(-1)
             membrane_mean = (trace * valid).sum() / (valid.sum() * trace.size(-1))
         losses.append((membrane_mean - threshold) ** 2)
     return torch.stack(losses).mean()
 
 
-def firing_rate_stats(hidden_spikes: Sequence[torch.Tensor]) -> Dict[str, float]:
+def firing_rate_stats(
+    hidden_spikes: Sequence[torch.Tensor],
+    lengths: Optional[torch.Tensor] = None,
+) -> Dict[str, float]:
     stats = {}
     for idx, trace in enumerate(hidden_spikes):
-        layer_rates = trace.detach().mean(dim=(0, 1))
+        trace = trace.detach()
+        valid = _valid_time_mask(trace, lengths)
+        if valid is None:
+            layer_rates = trace.mean(dim=(0, 1))
+        else:
+            valid_float = valid.to(trace.dtype).unsqueeze(-1)
+            layer_rates = (trace * valid_float).sum(dim=(0, 1)) / valid_float.sum().clamp_min(1)
         stats["firing_rate_layer_{}".format(idx)] = layer_rates.mean().item()
         stats["silent_neuron_ratio_layer_{}".format(idx)] = (
             layer_rates <= 0
         ).float().mean().item()
+    return stats
+
+
+def output_spike_stats(
+    output_spikes: object,
+    lengths: Optional[torch.Tensor] = None,
+    labels: Optional[torch.Tensor] = None,
+) -> Dict[str, float]:
+    if not torch.is_tensor(output_spikes) or output_spikes.numel() == 0:
+        return {}
+
+    trace = output_spikes.detach()
+    valid = _valid_time_mask(trace, lengths)
+    if valid is None:
+        masked = trace
+        denominator = torch.tensor(
+            trace.size(0) * trace.size(1), device=trace.device, dtype=trace.dtype
+        )
+    else:
+        valid_float = valid.to(trace.dtype).unsqueeze(-1)
+        masked = trace * valid_float
+        denominator = valid_float.sum().clamp_min(1)
+
+    class_rates = masked.sum(dim=(0, 1)) / denominator
+    eps = torch.finfo(trace.dtype).eps
+    clipped_rates = class_rates.clamp(eps, 1.0 - eps)
+    bernoulli_entropy = -(
+        clipped_rates * clipped_rates.log()
+        + (1.0 - clipped_rates) * (1.0 - clipped_rates).log()
+    )
+
+    counts_by_class = masked.sum(dim=0)
+    total_counts = counts_by_class.sum(dim=1)
+    stats = {
+        "firing_rate_output": class_rates.mean().item(),
+        "silent_neuron_ratio_output": (class_rates <= 0).float().mean().item(),
+        "entropy_output": bernoulli_entropy.mean().item(),
+        "no_output_spike_fraction": (total_counts <= 0).float().mean().item(),
+        "output_spike_count_mean": total_counts.mean().item(),
+        "output_spike_count_std": total_counts.std(unbiased=False).item(),
+    }
+
+    if labels is not None and labels.numel() == counts_by_class.size(0):
+        labels = labels.to(device=counts_by_class.device, dtype=torch.long)
+        correct_counts = counts_by_class.gather(1, labels[:, None]).squeeze(1)
+        if counts_by_class.size(1) > 1:
+            competitor_counts = counts_by_class.clone()
+            competitor_counts.scatter_(
+                1,
+                labels[:, None],
+                torch.finfo(competitor_counts.dtype).min,
+            )
+            max_competing_counts = competitor_counts.max(dim=1).values
+        else:
+            max_competing_counts = torch.zeros_like(correct_counts)
+
+        margin = correct_counts - max_competing_counts
+        stats.update(
+            {
+                "correct_class_output_spike_count_mean": correct_counts.mean().item(),
+                "correct_class_output_spike_count_std": correct_counts.std(
+                    unbiased=False
+                ).item(),
+                "max_competing_output_spike_count_mean": max_competing_counts.mean().item(),
+                "max_competing_output_spike_count_std": max_competing_counts.std(
+                    unbiased=False
+                ).item(),
+                "correct_minus_competing_output_spike_count_mean": margin.mean().item(),
+                "correct_output_gt_competing_fraction": (
+                    correct_counts > max_competing_counts
+                )
+                .float()
+                .mean()
+                .item(),
+            }
+        )
+
     return stats

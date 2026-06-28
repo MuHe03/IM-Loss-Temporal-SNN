@@ -6,28 +6,34 @@ from pathlib import Path
 from statistics import mean, stdev
 from typing import Dict, List
 
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("MPLCONFIGDIR", str(Path(".matplotlib").resolve()))
+
 import matplotlib.pyplot as plt
 
 
 SEED_ORDER = [2020, 42, 123, 309, 969]
 
-SETTINGS = [
-    {
-        "name": "lif_mlp_noim",
-        "label": "Non-spiking mean membrane",
-        "summary_csv": Path("runs/summary/shd_multiseed_best_test_eval.csv"),
-    },
-    {
-        "name": "spiking_count",
-        "label": "Spiking output count",
-        "root": Path("runs/ff_output_3way/spiking_count"),
-    },
-    {
-        "name": "spiking_count_im",
-        "label": "Spiking output count + IM",
-        "root": Path("runs/ff_output_3way/spiking_count_im"),
-    },
-]
+
+def make_settings(dataset: str, run_root: Path) -> List[Dict[str, object]]:
+    run_root = run_root / dataset.lower() / "ff_output_3way"
+    return [
+        {
+            "name": "lif_mlp_noim",
+            "label": "Non-spiking membrane",
+            "root": run_root / "nonspiking",
+        },
+        {
+            "name": "spiking_count",
+            "label": "Spiking output count",
+            "root": run_root / "spiking_count",
+        },
+        {
+            "name": "spiking_count_im",
+            "label": "Spiking output count + IM",
+            "root": run_root / "spiking_count_im",
+        },
+    ]
 
 
 def load_eval_json(path: Path) -> Dict[str, object]:
@@ -40,12 +46,109 @@ def load_eval_json(path: Path) -> Dict[str, object]:
     return dict(blob)
 
 
-def find_eval_rows() -> List[Dict[str, object]]:
+def load_training_metrics(path: Path) -> Dict[str, object]:
+    config_path = path.parent / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(config_path)
+
+    with open(config_path) as handle:
+        config_blob = json.load(handle)
+    config = dict(config_blob.get("config", {}))
+    metrics_blob = load_eval_json(path)
+    test = dict(metrics_blob.get("test", {}))
+
+    return {
+        "seed": config.get("seed"),
+        "output_mode": config.get("output_mode", "nonspiking"),
+        "readout": config.get("readout", "max_membrane"),
+        "use_im_loss_train": bool(config.get("use_im_loss", False)),
+        "im_include_output_train": bool(config.get("im_include_output", False)),
+        "im_loss_weight_train": float(config.get("im_loss_weight", 0.0)),
+        "im_loss_type_train": config.get("im_loss_type", ""),
+        "im_hidden_weight_train": float(config.get("im_hidden_weight", 1.0)),
+        "im_output_weight_train": float(config.get("im_output_weight", 1.0)),
+        "epoch": metrics_blob.get("best_epoch", ""),
+        "best_val_acc": float(metrics_blob.get("best_val_acc", 0.0)),
+        "test_acc_percent": 100.0 * float(test.get("acc", 0.0)),
+        "test_ce_loss": test.get("ce_loss", ""),
+        "test_im_loss": test.get("im_loss", ""),
+        "test_output_im_loss": test.get("output_im_loss", ""),
+        "test_firing_rate_layer_0": test.get("firing_rate_layer_0", ""),
+        "test_firing_rate_output": test.get("firing_rate_output", ""),
+        "test_entropy_output": test.get("entropy_output", ""),
+        "test_no_output_spike_fraction": test.get("no_output_spike_fraction", ""),
+        "test_output_spike_count_mean": test.get("output_spike_count_mean", ""),
+        "test_correct_class_output_spike_count_mean": test.get(
+            "correct_class_output_spike_count_mean", ""
+        ),
+        "test_max_competing_output_spike_count_mean": test.get(
+            "max_competing_output_spike_count_mean", ""
+        ),
+        "test_correct_output_gt_competing_fraction": test.get(
+            "correct_output_gt_competing_fraction", ""
+        ),
+        "checkpoint": metrics_blob.get("test_checkpoint", str(path.parent / "best.pth")),
+    }
+
+
+def find_eval_rows(
+    settings: List[Dict[str, object]],
+    allow_partial: bool = False,
+) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     missing = []
 
-    for setting in SETTINGS:
+    for setting in settings:
+        eval_by_seed: Dict[int, Path] = {}
+        root = setting.get("root")
+        if root is not None and root.exists():
+            for eval_path in sorted(root.glob("*/test_eval.json")):
+                row = load_eval_json(eval_path)
+                seed = int(row["seed"])
+                previous = eval_by_seed.get(seed)
+                if previous is None or eval_path.stat().st_mtime > previous.stat().st_mtime:
+                    eval_by_seed[seed] = eval_path
+
+        if eval_by_seed:
+            for seed in SEED_ORDER:
+                eval_path = eval_by_seed.get(seed)
+                if eval_path is None:
+                    missing.append((setting["name"], seed))
+                    continue
+                row = load_eval_json(eval_path)
+                row["setting"] = setting["name"]
+                row["setting_label"] = setting["label"]
+                row["eval_json"] = str(eval_path)
+                rows.append(row)
+            continue
+
+        metrics_by_seed: Dict[int, Path] = {}
+        if root is not None and root.exists():
+            for metrics_path in sorted(root.glob("*/metrics.json")):
+                row = load_training_metrics(metrics_path)
+                seed = int(row["seed"])
+                previous = metrics_by_seed.get(seed)
+                if previous is None or metrics_path.stat().st_mtime > previous.stat().st_mtime:
+                    metrics_by_seed[seed] = metrics_path
+
+        if metrics_by_seed:
+            for seed in SEED_ORDER:
+                metrics_path = metrics_by_seed.get(seed)
+                if metrics_path is None:
+                    missing.append((setting["name"], seed))
+                    continue
+                row = load_training_metrics(metrics_path)
+                row["setting"] = setting["name"]
+                row["setting_label"] = setting["label"]
+                row["eval_json"] = str(metrics_path)
+                rows.append(row)
+            continue
+
         if "summary_csv" in setting:
+            if not setting["summary_csv"].exists():
+                for seed in SEED_ORDER:
+                    missing.append((setting["name"], seed))
+                continue
             rows_by_seed: Dict[int, Dict[str, object]] = {}
             with open(setting["summary_csv"]) as handle:
                 for row in csv.DictReader(handle):
@@ -79,39 +182,23 @@ def find_eval_rows() -> List[Dict[str, object]]:
                 rows.append(row)
             continue
 
-        eval_by_seed: Dict[int, Path] = {}
-        root = setting["root"]
-        if root.exists():
-            for eval_path in sorted(root.glob("*/test_eval.json")):
-                row = load_eval_json(eval_path)
-                seed = int(row["seed"])
-                previous = eval_by_seed.get(seed)
-                if previous is None or eval_path.stat().st_mtime > previous.stat().st_mtime:
-                    eval_by_seed[seed] = eval_path
-
         for seed in SEED_ORDER:
-            eval_path = eval_by_seed.get(seed)
-            if eval_path is None:
-                missing.append((setting["name"], seed))
-                continue
-            row = load_eval_json(eval_path)
-            row["setting"] = setting["name"]
-            row["setting_label"] = setting["label"]
-            row["eval_json"] = str(eval_path)
-            rows.append(row)
+            missing.append((setting["name"], seed))
 
-    if missing:
+    if missing and not allow_partial:
         raise RuntimeError(f"Missing eval outputs: {missing}")
+    if not rows:
+        raise RuntimeError(f"No eval outputs found; missing expected outputs: {missing}")
 
-    setting_index = {setting["name"]: idx for idx, setting in enumerate(SETTINGS)}
+    setting_index = {setting["name"]: idx for idx, setting in enumerate(settings)}
     seed_index = {seed: idx for idx, seed in enumerate(SEED_ORDER)}
     rows.sort(key=lambda row: (setting_index[row["setting"]], seed_index[int(row["seed"])]))
     return rows
 
 
-def summarize(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+def summarize(rows: List[Dict[str, object]], settings: List[Dict[str, object]]) -> List[Dict[str, object]]:
     summary_rows: List[Dict[str, object]] = []
-    for setting in SETTINGS:
+    for setting in settings:
         values = [
             float(row["test_acc_percent"])
             for row in rows
@@ -154,6 +241,12 @@ def write_detail_csv(path: Path, rows: List[Dict[str, object]]) -> None:
         "test_output_im_loss",
         "test_firing_rate_layer_0",
         "test_firing_rate_output",
+        "test_entropy_output",
+        "test_no_output_spike_fraction",
+        "test_output_spike_count_mean",
+        "test_correct_class_output_spike_count_mean",
+        "test_max_competing_output_spike_count_mean",
+        "test_correct_output_gt_competing_fraction",
         "checkpoint",
         "eval_json",
     ]
@@ -181,6 +274,22 @@ def write_detail_csv(path: Path, rows: List[Dict[str, object]]) -> None:
                     "test_output_im_loss": row.get("test_output_im_loss", ""),
                     "test_firing_rate_layer_0": row.get("test_firing_rate_layer_0", ""),
                     "test_firing_rate_output": row.get("test_firing_rate_output", ""),
+                    "test_entropy_output": row.get("test_entropy_output", ""),
+                    "test_no_output_spike_fraction": row.get(
+                        "test_no_output_spike_fraction", ""
+                    ),
+                    "test_output_spike_count_mean": row.get(
+                        "test_output_spike_count_mean", ""
+                    ),
+                    "test_correct_class_output_spike_count_mean": row.get(
+                        "test_correct_class_output_spike_count_mean", ""
+                    ),
+                    "test_max_competing_output_spike_count_mean": row.get(
+                        "test_max_competing_output_spike_count_mean", ""
+                    ),
+                    "test_correct_output_gt_competing_fraction": row.get(
+                        "test_correct_output_gt_competing_fraction", ""
+                    ),
                     "checkpoint": row["checkpoint"],
                     "eval_json": row["eval_json"],
                 }
@@ -205,7 +314,7 @@ def write_summary_csv(path: Path, summary_rows: List[Dict[str, object]]) -> None
             writer.writerow(row)
 
 
-def plot_hist(path: Path, summary_rows: List[Dict[str, object]]) -> None:
+def plot_hist(path: Path, summary_rows: List[Dict[str, object]], dataset: str) -> None:
     labels = [row["setting_label"] for row in summary_rows]
     means = [float(row["mean_test_acc_percent"]) for row in summary_rows]
     stds = [float(row["std_test_acc_percent"]) for row in summary_rows]
@@ -251,8 +360,8 @@ def plot_hist(path: Path, summary_rows: List[Dict[str, object]]) -> None:
 
     ax.set_xticks(x_positions)
     ax.set_xticklabels(labels, rotation=12, ha="right")
-    ax.set_ylabel("SHD test accuracy (%)")
-    ax.set_title("FF-LIF output settings on SHD, 5 seeds")
+    ax.set_ylabel("{} test accuracy (%)".format(dataset))
+    ax.set_title("FF-LIF output settings on {}, 5 seeds".format(dataset))
     ax.set_ylim(0, 100)
     ax.grid(axis="y", alpha=0.25)
     ax.legend(frameon=False, loc="upper left")
@@ -262,8 +371,11 @@ def plot_hist(path: Path, summary_rows: List[Dict[str, object]]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Summarize FF-LIF SHD output-setting runs")
+    parser = argparse.ArgumentParser(description="Summarize FF-LIF output-setting runs")
+    parser.add_argument("--dataset", default="Randman", choices=["Randman", "SHD"])
+    parser.add_argument("--run_root", default="runs")
     parser.add_argument("--output_dir", default="runs/summary")
+    parser.add_argument("--allow_partial", action="store_true")
     return parser.parse_args()
 
 
@@ -271,20 +383,22 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
+    settings = make_settings(args.dataset, Path(args.run_root))
 
-    rows = find_eval_rows()
-    summary_rows = summarize(rows)
+    rows = find_eval_rows(settings, allow_partial=args.allow_partial)
+    summary_rows = summarize(rows, settings)
 
-    detail_csv = output_dir / "shd_ff_output_3way_test_eval.csv"
-    summary_csv = output_dir / "shd_ff_output_3way_summary.csv"
-    json_path = output_dir / "shd_ff_output_3way_summary.json"
-    hist_path = output_dir / "shd_ff_output_3way_hist.png"
+    prefix = args.dataset.lower()
+    detail_csv = output_dir / "{}_ff_output_3way_test_eval.csv".format(prefix)
+    summary_csv = output_dir / "{}_ff_output_3way_summary.csv".format(prefix)
+    json_path = output_dir / "{}_ff_output_3way_summary.json".format(prefix)
+    hist_path = output_dir / "{}_ff_output_3way_hist.png".format(prefix)
 
     write_detail_csv(detail_csv, rows)
     write_summary_csv(summary_csv, summary_rows)
     with open(json_path, "w") as handle:
         json.dump({"results": rows, "summary": summary_rows}, handle, indent=2)
-    plot_hist(hist_path, summary_rows)
+    plot_hist(hist_path, summary_rows, args.dataset)
 
     for row in summary_rows:
         print(
