@@ -7,11 +7,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from data.randman import build_randman_loaders
 from data.shd import SHDCollate, SHDEventDataset
 from models.temporal_snn import (
     FeedForwardLIFClassifier,
     RecurrentLIFClassifier,
     firing_rate_stats,
+    output_spike_stats,
     temporal_im_loss,
     temporal_threshold_im_loss,
 )
@@ -36,16 +38,6 @@ class AverageMeter:
 def accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
     predictions = logits.argmax(dim=1)
     return predictions.eq(labels).float().mean().item()
-
-
-def output_firing_stats(output_spikes: torch.Tensor) -> Dict[str, float]:
-    if not torch.is_tensor(output_spikes) or output_spikes.numel() == 0:
-        return {}
-    class_rates = output_spikes.detach().mean(dim=(0, 1))
-    return {
-        "firing_rate_output": class_rates.mean().item(),
-        "silent_neuron_ratio_output": (class_rates <= 0).float().mean().item(),
-    }
 
 
 def build_model(config: Dict[str, object], meta: Dict[str, object]) -> nn.Module:
@@ -142,11 +134,15 @@ def evaluate(
                 im_loss = hidden_im_loss + output_weight * output_im_loss
                 im_meter.update(im_loss.item(), batch_size)
                 output_im_meter.update(output_im_loss.item(), batch_size)
-                for name, value in firing_rate_stats(aux["hidden_spikes"]).items():
+                for name, value in firing_rate_stats(
+                    aux["hidden_spikes"], lengths=lengths
+                ).items():
                     firing_meters.setdefault(name, AverageMeter()).update(
                         value, batch_size
                     )
-                for name, value in output_firing_stats(aux.get("output_spikes", [])).items():
+                for name, value in output_spike_stats(
+                    aux.get("output_spikes", []), lengths=lengths, labels=labels
+                ).items():
                     firing_meters.setdefault(name, AverageMeter()).update(
                         value, batch_size
                     )
@@ -169,7 +165,7 @@ def eval_checkpoint(path: str, args) -> Dict[str, object]:
     config = checkpoint.get("config", {})
     meta = checkpoint.get("meta", {})
 
-    data_root = args.data_root or str(config.get("data_root", "datasets/SHD"))
+    dataset_name = str(meta.get("dataset", config.get("dataset", "SHD")))
     dt = args.dt if args.dt is not None else float(meta.get("dt", config.get("dt", 0.005)))
     t_stop = (
         args.t_stop
@@ -178,26 +174,53 @@ def eval_checkpoint(path: str, args) -> Dict[str, object]:
     )
     input_mode = str(meta.get("input_mode", config.get("input_mode", "binary")))
 
-    dataset = SHDEventDataset(root=data_root, split="test")
-    collate_fn = SHDCollate(
-        dt=dt,
-        t_stop=t_stop,
-        num_units=int(meta.get("num_inputs", 700)),
-        input_mode=input_mode,
-    )
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=args.device.startswith("cuda"),
-        collate_fn=collate_fn,
-    )
+    if dataset_name == "Randman":
+        _, _, loader, randman_meta = build_randman_loaders(
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            train_samples=int(config.get("randman_train_samples", meta.get("train_size", 1024))),
+            val_samples=int(config.get("randman_val_samples", meta.get("val_size", 256))),
+            test_samples=int(config.get("randman_test_samples", meta.get("test_size", 256))),
+            num_units=int(meta.get("num_inputs", config.get("randman_input_size", 128))),
+            num_classes=int(meta.get("num_classes", config.get("randman_num_classes", 10))),
+            num_steps=int(meta.get("num_steps", config.get("randman_num_steps", 100))),
+            manifold_dim=int(meta.get("manifold_dim", config.get("randman_manifold_dim", 2))),
+            spike_prob=float(meta.get("spike_prob", config.get("randman_spike_prob", 0.35))),
+            noise_rate=float(meta.get("noise_rate", config.get("randman_noise_rate", 0.001))),
+            jitter_std=float(meta.get("jitter_std", config.get("randman_jitter_std", 1.0))),
+            seed=int(config.get("seed", meta.get("seed", 2020))),
+            pin_memory=args.device.startswith("cuda"),
+        )
+        collate_num_steps = int(randman_meta["num_steps"])
+    elif dataset_name == "SHD":
+        data_root = args.data_root or str(config.get("data_root", "datasets/SHD"))
+        dataset = SHDEventDataset(root=data_root, split="test")
+        collate_fn = SHDCollate(
+            dt=dt,
+            t_stop=t_stop,
+            num_units=int(meta.get("num_inputs", 700)),
+            input_mode=input_mode,
+        )
+        loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=args.device.startswith("cuda"),
+            collate_fn=collate_fn,
+        )
+        collate_num_steps = collate_fn.num_steps
+    else:
+        raise ValueError("unsupported dataset: {}".format(dataset_name))
 
     model = build_model(config, meta).to(args.device)
     model.load_state_dict(checkpoint["model_state"])
     criterion = nn.CrossEntropyLoss()
-    compute_activity = args.compute_activity or bool(config.get("use_im_loss", False))
+    compute_activity = (
+        args.compute_activity
+        or bool(config.get("use_im_loss", False))
+        or str(config.get("output_mode", "nonspiking")) == "spiking_count"
+    )
     im_loss_type = str(config.get("im_loss_type", "rate"))
     target_rate = float(config.get("im_target_rate", args.im_target_rate))
     threshold = float(config.get("threshold", 1.0))
@@ -219,6 +242,7 @@ def eval_checkpoint(path: str, args) -> Dict[str, object]:
     metrics.update(
         {
             "checkpoint": path,
+            "dataset": dataset_name,
             "arch": config.get("arch", "lif_mlp"),
             "seed": config.get("seed"),
             "hidden_size": config.get("hidden_size"),
@@ -226,10 +250,11 @@ def eval_checkpoint(path: str, args) -> Dict[str, object]:
             "output_mode": config.get("output_mode", "nonspiking"),
             "readout": config.get("readout", "mean_membrane"),
             "epoch": checkpoint.get("epoch"),
+            "best_epoch": checkpoint.get("best_epoch"),
             "best_val_acc": checkpoint.get("best_val_acc"),
             "dt": dt,
             "t_stop": t_stop,
-            "num_steps": collate_fn.num_steps,
+            "num_steps": collate_num_steps,
             "input_mode": input_mode,
             "use_im_loss_train": bool(config.get("use_im_loss", False)),
             "im_loss_weight_train": float(config.get("im_loss_weight", 0.0)),
@@ -245,7 +270,7 @@ def eval_checkpoint(path: str, args) -> Dict[str, object]:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Evaluate temporal-native SHD checkpoints on the test set",
+        description="Evaluate temporal-native temporal SNN checkpoints on the test set",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("checkpoints", nargs="+")

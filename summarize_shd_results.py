@@ -6,6 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List
 
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("MPLCONFIGDIR", str(Path(".matplotlib").resolve()))
+
 import matplotlib.pyplot as plt
 import torch
 
@@ -16,18 +19,22 @@ RUN_ROOTS = {
     "lif_mlp_noim": [
         "runs/temporal_baseline",
         "runs/temporal_multiseed/lif_mlp_baseline",
+        "runs/shd/temporal_multiseed/lif_mlp_baseline",
     ],
     "lif_mlp_im": [
         "runs/temporal_imloss",
         "runs/temporal_multiseed/lif_mlp_imloss",
+        "runs/shd/temporal_multiseed/lif_mlp_imloss",
     ],
     "rsnn_lif_noim": [
         "runs/temporal_rsnn_baseline",
         "runs/temporal_multiseed/rsnn_lif_baseline",
+        "runs/shd/temporal_multiseed/rsnn_lif_baseline",
     ],
     "rsnn_lif_im": [
         "runs/temporal_rsnn_imloss",
         "runs/temporal_multiseed/rsnn_lif_imloss",
+        "runs/shd/temporal_multiseed/rsnn_lif_imloss",
     ],
 }
 
@@ -41,11 +48,18 @@ SETTING_LABELS = {
 }
 
 
-def find_checkpoints() -> Dict[str, Dict[int, str]]:
+def find_checkpoints(run_root: str = "runs") -> Dict[str, Dict[int, str]]:
     checkpoints: Dict[str, Dict[int, str]] = {setting: {} for setting in SETTING_ORDER}
+    run_root_path = Path(run_root)
+    run_root_overrides = {
+        "lif_mlp_noim": [run_root_path / "shd" / "temporal_multiseed" / "lif_mlp_baseline"],
+        "lif_mlp_im": [run_root_path / "shd" / "temporal_multiseed" / "lif_mlp_imloss"],
+        "rsnn_lif_noim": [run_root_path / "shd" / "temporal_multiseed" / "rsnn_lif_baseline"],
+        "rsnn_lif_im": [run_root_path / "shd" / "temporal_multiseed" / "rsnn_lif_imloss"],
+    }
     for setting, roots in RUN_ROOTS.items():
-        for root in roots:
-            root_path = Path(root)
+        candidate_roots = [Path(root) for root in roots] + run_root_overrides[setting]
+        for root_path in candidate_roots:
             if not root_path.exists():
                 continue
             for ckpt_path in sorted(root_path.glob("*/best.pth")):
@@ -162,6 +176,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Evaluate and summarize SHD temporal SNN multiseed results"
     )
+    parser.add_argument("--run_root", default="runs")
     parser.add_argument("--output_dir", default="runs/summary")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -173,7 +188,7 @@ def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    checkpoints = find_checkpoints()
+    checkpoints = find_checkpoints(args.run_root)
     missing = []
     rows = []
     eval_args = SimpleNamespace(
