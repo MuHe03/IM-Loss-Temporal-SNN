@@ -32,10 +32,13 @@ class SHDEventDataset(Dataset):
 
         with h5py.File(self.path, "r") as handle:
             self._length = len(handle["labels"])
-            self.keys = [
-                key.decode("utf-8") if hasattr(key, "decode") else str(key)
-                for key in handle["extra"]["keys"][:]
-            ]
+            if "extra" in handle and "keys" in handle["extra"]:
+                self.keys = [
+                    key.decode("utf-8") if hasattr(key, "decode") else str(key)
+                    for key in handle["extra"]["keys"][:]
+                ]
+            else:
+                self.keys = []
 
         self._handle = None
 
