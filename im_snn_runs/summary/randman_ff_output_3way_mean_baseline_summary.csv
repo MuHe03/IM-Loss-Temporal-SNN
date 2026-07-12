@@ -1,0 +1,4 @@
+setting,setting_label,n,mean_test_acc_percent,std_test_acc_percent,min_test_acc_percent,max_test_acc_percent,seed_test_acc_percent
+lif_mlp_mean_noim,Non-spiking mean membrane,5,52.8125,2.3010431992223657,50.78125,55.859375,51.1719;51.5625;50.7812;55.8594;54.6875
+spiking_count,Spiking output count,5,83.046875,2.5555355052806448,79.296875,85.546875,81.6406;79.2969;83.9844;84.7656;85.5469
+spiking_count_im,Spiking output count + IM,5,83.203125,3.088161777508183,80.46875,87.890625,81.2500;81.6406;80.4688;84.7656;87.8906

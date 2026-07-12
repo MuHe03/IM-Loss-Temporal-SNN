@@ -1,0 +1,4 @@
+setting,setting_label,n,mean_test_acc_percent,std_test_acc_percent
+lif_mlp_mean_noim,Non-spiking mean membrane,5.0,75.98056538366177,1.7289454954789667
+spiking_count,Spiking output count,5.0,59.38162545643931,2.392427740086794
+spiking_count_im_lambda_0p003,Spiking output count + IM (lambda=0.003),3.0,59.64369851091024,2.212158304080785
