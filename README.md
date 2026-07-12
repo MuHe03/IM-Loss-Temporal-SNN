@@ -187,7 +187,7 @@ Important limitations:
 
 ## Author Contributions
 
-Mu He and Fadi Ferjani jointly designed the study, reviewed the project plan, interpreted results, and prepared the final presentation material. Fadi Ferjani focused on the temporal data pipeline, baseline/spiking readout comparisons, repository organization, and runnable experiment workflow. Mu He focused on IM-loss experiment design, lambda sweeps, result summaries, plots, and scientific interpretation. Both authors contributed to debugging, documentation, and final result selection.
+Mu He and Fadi Ferjani jointly designed the study, reviewed the project plan, interpreted results, and prepared the final presentation material. Mu He focused on the temporal data pipeline, baseline/spiking readout comparisons, repository organization, and runnable experiment workflow. Fadi Ferjani focused on IM-loss experiment design, lambda sweeps, result summaries, plots, and scientific interpretation. Both authors contributed to debugging, documentation, and final result selection.
 
 ## Documentation Of LLM Usage
 
