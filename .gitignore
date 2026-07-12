@@ -1,4 +1,4 @@
-runs/
+﻿runs/
 raw/
 summaries/
 cifar10/
@@ -6,8 +6,16 @@ cifar100/
 *.pth
 *.pt
 *.ckpt
+
 datasets/SHD/*.h5
 datasets/SHD/*.h5.gz
+
+# Local run artifacts. Keep final summaries and figures versionable.
+im_snn_runs/*
+!im_snn_runs/summary/
+!im_snn_runs/summary/*.csv
+!im_snn_runs/summary/*.json
+!im_snn_runs/summary/*.png
 
 # Python bytecode and tool caches
 __pycache__/
@@ -19,6 +27,9 @@ __pycache__/
 .matplotlib/
 .venv/
 venv/
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
 
-# Keep Markdown notes versionable while allowing local PDF briefs to remain local.
-docs/
+# Local project briefs / planning notes; keep the final technical note versionable.
+docs/*.pdf
+docs/implementation_gap_analysis_and_task_plan.md
