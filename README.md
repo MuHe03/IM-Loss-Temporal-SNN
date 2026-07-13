@@ -132,58 +132,6 @@ python summarize_lambda_sweep.py --dataset SHD --loss_type rate --run_root im_sn
 
 The full Colab workflow is in `notebooks/colab_run_experiments.ipynb`. It was used to run the GPU experiments, collect summaries, and generate the final figures. Expected runtime for the full notebook is many hours on a Colab T4 GPU; for quick checks, run one-batch smoke tests or reduce the number of seeds.
 
-## Main Results
-
-All values below are mean test accuracy percent plus/minus standard deviation over seeds.
-
-### Randman
-
-| Condition | Seeds | Test accuracy |
-|---|---:|---:|
-| Non-spiking max membrane | 5 | 79.06 +/- 2.57 |
-| Spiking output count | 5 | 83.05 +/- 2.56 |
-| Spiking output count + rate IM, lambda 0.001 | 5 | 83.20 +/- 3.09 |
-| Non-spiking mean membrane sensitivity check | 5 | 52.81 +/- 2.30 |
-
-The Randman rate-IM sweep showed the best mean test accuracy at lambda `0.0001` with `82.42 +/- 1.17`, while lambda `0.001` was selected by mean validation accuracy but did not improve test accuracy. Randman therefore does not show the expected performance gap between spiking and non-spiking output; spike-count readout is already strong for this synthetic temporal task.
-
-### SHD
-
-| Condition | Seeds | Test accuracy |
-|---|---:|---:|
-| Non-spiking max membrane | 5 | 38.46 +/- 2.99 |
-| Non-spiking mean membrane | 5 | 75.98 +/- 1.73 |
-| Spiking output count | 5 | 59.38 +/- 2.39 |
-| Spiking output count + rate IM, lambda 0.001 | 5 | 57.74 +/- 3.01 |
-| Spiking output count + rate IM, lambda 0.003 | 3 | 59.64 +/- 2.21 |
-
-The SHD mean-membrane sensitivity check is the most important control: it shows that the low max-membrane baseline was a readout confound. With a stronger non-spiking readout, SHD supports the main hypothesis qualitatively: spiking output loses performance relative to non-spiking membrane output, and tuned IM gives only a small improvement over naive spike counts.
-
-## Figures And Result Files
-
-Final result artifacts are stored in `im_snn_runs/summary/`.
-
-Recommended figures for presentation:
-
-- `shd_final_mean_baseline_lambda_0p003_hist.png` - final SHD comparison with mean-membrane baseline and tuned IM.
-- `shd_rate_lambda_sweep_accuracy.png` - SHD lambda-accuracy curve.
-- `shd_rate_lambda_sweep_diagnostics.png` - SHD output firing/entropy/no-output diagnostics.
-- `randman_ff_output_3way_hist.png` - Randman three-condition comparison.
-- `randman_rate_lambda_sweep_accuracy.png` - Randman rate-IM lambda sweep.
-- `randman_rate_lambda_sweep_diagnostics.png` - Randman output activity diagnostics.
-
-The corresponding CSV/JSON files in the same folder contain the numeric values used to generate the figures.
-
-## Interpretation And Limitations
-
-The results support a nuanced conclusion rather than a simple positive IM result. On SHD, output spike-count classification underperforms a strong non-spiking mean-membrane readout, which supports the idea that output spike quantization can lose graded evidence. Output-layer IM changes output spike statistics and can slightly improve over naive spiking output after lambda tuning, but it does not close the SHD performance gap. On Randman, spike-count output is already competitive or better than the non-spiking max-membrane baseline, showing that the effect depends strongly on the dataset and readout.
-
-Important limitations:
-
-- The implementation uses fixed fast-sigmoid surrogate gradients, not the full Evolutionary Surrogate Gradient method from the IM-Loss paper.
-- IM is implemented as rate-style and threshold-style regularization, not a full reproduction of all paper training details.
-- The SHD tuned-IM final comparison uses 3 seeds for the lambda sweep condition, while the main three-condition comparison uses 5 seeds.
-- Runtime constraints limited additional ablations such as hidden-layer IM, recurrent models, and timestep sweeps.
 
 ## Author Contributions
 
@@ -191,7 +139,7 @@ Mu He and Fadi Ferjani jointly designed the study, reviewed the project plan, in
 
 ## Documentation Of LLM Usage
 
-ChatGPT/Codex based on GPT-5 was used to assist with repository organization, code refactoring, notebook workflow design, documentation drafting, result interpretation, and presentation planning. The authors remain responsible for verifying the generated code, running the experiments, checking the saved outputs, and understanding the final methods and conclusions.
+ChatGPT/Codex based on GPT-5 was used to assist with repository organization, code refactoring, notebook workflow design, documentation drafting, result interpretation, and presentation planning. The authors remain responsible for verifying the generated code, running the experiments, checking the saved outputs, and understanding the methods and conclusions.
 
 ## Citation
 
