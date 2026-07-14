@@ -16,6 +16,7 @@ This project tests whether an output-layer information-maximization (IM) regular
 - `summarize_ff_output_3way.py` - three-condition output/readout summary and bar plots.
 - `summarize_lambda_sweep.py` - lambda sweep summaries and plots.
 - `summarize_shd_results.py` - additional SHD multiseed summary utility.
+- `visualize_membrane_dynamics.py` - reproduce the archived SHD output-dynamics figures.
 - `notebooks/colab_run_experiments.ipynb` - Colab workflow used for GPU runs, summaries, plots, and final comparisons.
 - `docs/technical_note.md` - method, results, limitations, and interpretation.
 - `datasets/SHD/` - expected location for local SHD files.
@@ -129,6 +130,26 @@ Lambda sweep summary:
 python summarize_lambda_sweep.py --dataset Randman --loss_type rate --run_root im_snn_runs --output_dir im_snn_runs/summary
 python summarize_lambda_sweep.py --dataset SHD --loss_type rate --run_root im_snn_runs --output_dir im_snn_runs/summary
 ```
+
+SHD output-dynamics figures:
+
+```bash
+python visualize_membrane_dynamics.py \
+  --input-prefix im_snn_runs/summary/shd_threshold_1p0_membrane_dynamics \
+  --output-dir im_snn_runs/summary
+```
+
+This renderer does not reload checkpoints or rerun SHD inference. It requires
+the following deterministic archives with the same prefix:
+
+- `*_per_run.json`: multi-seed aggregate time series.
+- `*_sample_manifest.csv`: selected sample and class metadata.
+- `*_selected_traces.npz`: archived output spikes, counts, and membrane traces.
+
+It writes `*_selected_sample_spike_rasters.png`, which compares all 20 output
+neurons and their final spike counts, and `*_output_time_course.png`, which
+summarizes membrane, threshold-crossing, firing-rate, and entropy dynamics over
+time. Use `--output-prefix` to change only the generated filename prefix.
 
 The full Colab workflow is in `notebooks/colab_run_experiments.ipynb`. It was used to run the GPU experiments, collect summaries, and generate the final figures. Expected runtime for the full notebook is many hours on a Colab T4 GPU; for quick checks, run one-batch smoke tests or reduce the number of seeds.
 
